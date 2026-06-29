@@ -2,7 +2,7 @@
 
 > Visually pick a webpage element, annotate it, and let Claude Code change exactly that.
 
-可视化选取网页元素 → 写批注 → 让 Claude Code 精准定位代码去改。
+可视化选取网页元素 → 写批注 → 让 Claude Code 精准定位代码去改。**适用于任何静态网站项目。**
 
 当你要改网页上"那块"东西时，不用费劲描述位置——直接在浏览器里**用鼠标点选元素**，打个勾写句批注，Claude 就知道你指的是哪个，直接定位到代码改掉。
 
@@ -10,49 +10,18 @@
 
 ---
 
-## 它怎么工作
-
-```
-你说「我要改首屏这个标题」
-        ↓
-skill 自动起本地服务 + 打开浏览器
-        ↓
-你在网页上：鼠标移动高亮 → [ ] 切换堆叠图层 → Enter 选中 → 写批注 → ✓ 选完了
-        ↓
-Claude 读取标注（CSS selector / XPath / 文本预览 / 你的批注）
-        ↓
-Claude 精准定位 index.html / styles.css / script.js 里对应代码 → 改
-```
-
-## 核心特性
-
-- **图层切换** — 鼠标停在重叠元素上，用 `[` `]` 在堆叠层级间上下切（基于 `document.elementsFromPoint`），选到任意一层，不被最顶层挡住。
-- **Shadow DOM 隔离** — picker UI 与页面 CSS 完全隔离，不污染你的样式，也不被你的样式破坏。
-- **结构化标注** — 每条标注自动生成稳健的 CSS selector / XPath / 元素矩形 / 文本预览，AI 能精确对应回代码。
-- **三种标签** — 🔴 改 / 🟡 问 / 🟢 赞，分类管理。
-- **零依赖** — server 用 Node 内置模块，无需 `npm install`。
-
-## 快速开始
-
-### 1. 把 skill 装进 Claude Code
+## 安装（一条命令）
 
 ```bash
-# 用户级（所有项目可用，推荐）
-cp -r skills/pick-to-edit ~/.claude/skills/
-
-# 或项目级（仅当前项目）
-cp -r skills/pick-to-edit .claude/skills/
+git clone https://github.com/CGIFM/pick-to-edit.git
+cp -r pick-to-edit/skills/pick-to-edit ~/.claude/skills/
 ```
 
-### 2. 把 picker + server 放进你的网页项目
+skill 目录**自带 `picker.js` + `annotate-server.js`**，触发时会自动部署到目标项目——你不用给每个网站手动配置。
 
-```bash
-cp picker.js annotate-server.js package.json /path/to/your-website/
-```
+## 用起来
 
-### 3. 用起来
-
-在 Claude Code 里说一句人话：
+在**任意静态网站项目**的 Claude Code 对话里说一句人话：
 
 > 我要改首页那个标题
 
@@ -62,7 +31,32 @@ cp picker.js annotate-server.js package.json /path/to/your-website/
 /pick-to-edit
 ```
 
-Claude 会自动 `npm run annotate` 起服务、打开浏览器。你选完元素、点「✓ 选完了」，回对话告诉它怎么改即可。
+Claude 会自动把工具复制到该项目、起服务、打开浏览器。你选完元素、点「✓ 选完了」，回对话告诉它怎么改即可。
+
+## 它怎么工作
+
+```
+你说「我要改首页这个标题」
+        ↓
+skill 自动把 picker.js + annotate-server.js 复制到当前项目（仅首次）
+        ↓
+起本地服务 + 打开浏览器
+        ↓
+你在网页上：鼠标移动高亮 → [ ] 切换堆叠图层 → Enter 选中 → 写批注 → ✓ 选完了
+        ↓
+Claude 读取标注（CSS selector / XPath / 文本预览 / 你的批注）
+        ↓
+Claude 精准定位 html / css / js 里对应代码 → 改
+```
+
+## 核心特性
+
+- **任意项目通用** — skill 自带工具文件，自动部署，不限某个网站。
+- **图层切换** — 鼠标停在重叠元素上，用 `[` `]` 在堆叠层级间上下切（基于 `document.elementsFromPoint`），选到任意一层。
+- **Shadow DOM 隔离** — picker UI 与页面 CSS 完全隔离，不污染你的样式，也不被破坏。
+- **结构化标注** — 每条标注自动生成稳健的 CSS selector / XPath / 元素矩形 / 文本预览。
+- **三种标签** — 🔴 改 / 🟡 问 / 🟢 赞。
+- **零依赖** — server 用 Node 内置模块，无需 `npm install`，也不碰你项目的 `package.json`。
 
 ## 操作速查
 
@@ -82,7 +76,7 @@ Claude 会自动 `npm run annotate` 起服务、打开浏览器。你选完元�
 
 ## 标注数据格式
 
-每条标注写入 `annotations.json`：
+每条标注写入目标项目的 `annotations.json`：
 
 ```json
 {
@@ -102,23 +96,20 @@ Claude 会自动 `npm run annotate` 起服务、打开浏览器。你选完元�
 
 - **端口**：默认 `4321`，改 `annotate-server.js` 顶部的 `PORT`。
 - **标签**：改 `picker.js` 里的 `.tag` 元素（默认 改 / 问 / 赞）。
-- **目标页面**：skill 默认 `index.html`，触发时可指定其他 HTML。
 
 ## 文件说明
 
-| 文件 | 作用 |
-|---|---|
-| `picker.js` | 前端可视化选择器（Shadow DOM 隔离，hover 高亮 + `[` `]` 切层） |
-| `annotate-server.js` | 本地零依赖服务，serve 当前目录 + 自动注入 picker + 接收标注 |
-| `skills/pick-to-edit/SKILL.md` | Claude Code skill 定义 |
-| `package.json` | `npm run annotate` 启动脚本 |
-
-## 工作原理
-
-1. `annotate-server.js` serve 你的项目目录，并在返回 HTML 时自动注入 `<script src="/__picker.js">`。
-2. `picker.js` 装进 Shadow DOM 与页面隔离；鼠标移动时用 `document.elementsFromPoint(x, y)` 取到该坐标下**整摞**重叠元素，按键在栈里上下切换。
-3. 选中 + 写批注 + 确认 → POST 到 server → append 进 `annotations.json`。
-4. Claude 读 `annotations.json`，靠 `selector` / `textPreview` 定位代码改动。
+```
+pick-to-edit/
+├── README.md
+├── LICENSE
+├── package.json
+└── skills/
+    └── pick-to-edit/
+        ├── SKILL.md              # Claude Code skill 定义（自动部署 + 触发流程）
+        ├── picker.js             # 前端可视化选择器（Shadow DOM 隔离）
+        └── annotate-server.js    # 零依赖本地服务，serve 当前目录 + 自动注入 picker
+```
 
 ## License
 
