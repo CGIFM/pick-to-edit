@@ -2,32 +2,33 @@
  * picker.js — 可视化元素标注选择器
  *
  * 交互：
- *   鼠标移动        实时高亮当前层
- *   ]              往底层（父级方向）切
- *   [              往顶层（子级方向）切
- *   滚轮            滚动页面（pick 模式下仍能滚，方便标注下方元素）
- *   Enter / 点击    锁定 → 弹批注框 → 打勾确认
- *   1/2/3           选层（直接跳到第 N 层）
- *   Esc             取消 / 退出 pick 模式
+ *   鼠标移动        实时高亮 + 选择器预览 + 尺寸
+ *   ] / [          往底层/顶层切
+ *   1-9            直接跳到第 N 层
+ *   滚轮            滚动页面
+ *   Enter / 点击    锁定 → 自动复制 selector → 弹批注框
+ *   ⌘/Ctrl + C     hover 时直接复制当前层 selector（无需选中）
+ *   ⌘/Ctrl + Enter  hover 时快速标注（选中即提交，跳过打字）
+ *   ⌘/Ctrl + Z     撤销上一条标注
+ *   Tab (批注框)    切换标签 改/问/赞
+ *   Esc             关闭面板 / 取消 / 退出 pick
  *
  * 设计要点：
- *   - 整个 picker UI 装进 Shadow DOM，与页面 CSS 完全隔离
- *   - 用 document.elementsFromPoint() 拿到鼠标坐标下的「整摞」重叠元素，
- *     再按键在栈里上下切换 —— 解决图层堆叠选不到下层的问题
- *   - 临时把 host 设为 pointer-events:none 再取栈，host 自身不会污染结果
+ *   - Shadow DOM 与页面 CSS 完全隔离
+ *   - elementsFromPoint 取整摞重叠元素，按键切层
+ *   - 选中即复制 selector 到剪贴板
  */
 (function () {
   'use strict';
 
-  // 唯一标记，便于从 elementsFromPoint 结果里过滤掉 picker 自身
   const HOST_FLAG = 'data-pk-host';
 
-  // ---------- 1. 搭建 Shadow DOM 隔离的 UI ----------
+  // ---------- 1. Shadow DOM UI ----------
   const host = document.createElement('div');
   host.setAttribute(HOST_FLAG, '');
   Object.assign(host.style, {
     position: 'fixed', inset: '0', zIndex: '2147483647',
-    pointerEvents: 'none',     // 默认不拦截；激活时再打开 overlay 的拦截
+    pointerEvents: 'none',
   });
   document.documentElement.appendChild(host);
 
@@ -36,34 +37,31 @@
     <style>
       :host, * { box-sizing: border-box; }
 
-      /* 高亮框：套在当前 hover 层上 */
       #hl {
         position: fixed; margin: 0; padding: 0;
         border: 2px solid #4f8cff; background: rgba(79,140,255,.12);
         border-radius: 3px; pointer-events: none;
         transition: all .04s linear; display: none;
-        box-shadow: 0 0 0 9999px rgba(0,0,0,0); /* 占位 */
       }
       #hl.pin { border-color: #ff5a5a; background: rgba(255,90,90,.14); }
 
-      /* 层级徽标：显示 当前层/总层数 */
       #badge {
         position: fixed; top: 0; left: 0; transform: translate(-50%, -150%);
-        background: #111827; color: #fff; font: 600 11px/1 -apple-system, system-ui, sans-serif;
-        padding: 3px 7px; border-radius: 5px; white-space: nowrap;
+        background: #111827; color: #fff; font: 600 11px/1.4 -apple-system, system-ui, sans-serif;
+        padding: 4px 8px; border-radius: 5px; white-space: nowrap;
         pointer-events: none; display: none;
       }
       #badge small { color: #9ca3af; font-weight: 400; }
 
-      /* 元素信息条：标签名 + class */
       #info {
         position: fixed; top: 0; left: 0; transform: translate(0, 100%);
         background: rgba(17,24,39,.92); color: #e5e7eb; font: 11px/1.4 ui-monospace, Menlo, monospace;
-        padding: 4px 8px; border-radius: 4px; max-width: 60vw; overflow: hidden;
+        padding: 4px 8px; border-radius: 4px; max-width: 80vw; overflow: hidden;
         text-overflow: ellipsis; white-space: nowrap; pointer-events: none; display: none;
       }
+      #info .dim { color: #9ca3af; }
+      #info .pv { color: #60a5fa; }
 
-      /* 顶部工具栏 */
       #bar {
         position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
         background: #111827; color: #fff; font: 13px/1 -apple-system, system-ui, sans-serif;
@@ -77,14 +75,17 @@
         border-radius: 4px; padding: 1px 5px; font: 11px ui-monospace, monospace; color: #d1d5db;
       }
       #bar .muted { color: #9ca3af; }
-      #bar .count { color: #60a5fa; font-variant-numeric: tabular-nums; }
+      #bar .count {
+        color: #60a5fa; font-variant-numeric: tabular-nums; cursor: pointer;
+        padding: 2px 6px; border-radius: 4px;
+      }
+      #bar .count:hover { background: #1f2937; }
       #bar button {
         background: transparent; color: #9ca3af; border: 1px solid #374151;
         border-radius: 5px; padding: 3px 8px; font: inherit; cursor: pointer;
       }
       #bar button:hover { color: #fff; border-color: #6b7280; }
 
-      /* 退出后的悬浮小按钮 */
       #fab {
         position: fixed; bottom: 18px; right: 18px; width: 44px; height: 44px;
         border-radius: 50%; background: #4f8cff; color: #fff; border: none;
@@ -93,20 +94,25 @@
         pointer-events: auto;
       }
 
-      /* 批注浮层 */
       #note-card {
-        position: fixed; width: 280px; background: #fff; border-radius: 10px;
+        position: fixed; width: 300px; background: #fff; border-radius: 10px;
         padding: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.3);
         font: 13px/1.4 -apple-system, system-ui, sans-serif; color: #111827;
         display: none;
       }
       #note-card .sel {
-        font: 11px/1.4 ui-monospace, Menlo, monospace; color: #6b7280;
+        font: 11px/1.4 ui-monospace, Menlo, monospace; color: #374151;
         background: #f3f4f6; padding: 5px 7px; border-radius: 5px;
-        word-break: break-all; margin-bottom: 8px; max-height: 70px; overflow: auto;
+        word-break: break-all; margin-bottom: 6px; max-height: 70px; overflow: auto;
       }
+      #note-card .copy-row { display: flex; gap: 4px; margin-bottom: 8px; }
+      #note-card .copy-row button {
+        flex: 1; background: #f3f4f6; color: #6b7280; border: none;
+        border-radius: 4px; padding: 4px 0; font: 11px ui-monospace, monospace; cursor: pointer;
+      }
+      #note-card .copy-row button:hover { background: #e5e7eb; color: #111827; }
       #note-card textarea {
-        width: 100%; min-height: 64px; border: 1px solid #d1d5db; border-radius: 6px;
+        width: 100%; min-height: 58px; border: 1px solid #d1d5db; border-radius: 6px;
         padding: 7px; font: inherit; resize: vertical; outline: none;
       }
       #note-card textarea:focus { border-color: #4f8cff; }
@@ -117,22 +123,58 @@
       }
       #note-card .tag.active { border-color: #111827; }
       #note-card .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
-      #note-card button {
+      #note-card .row button {
         border: none; border-radius: 6px; padding: 6px 14px; font: inherit; cursor: pointer;
       }
       #note-card .ok { background: #111827; color: #fff; }
       #note-card .no { background: #f3f4f6; color: #6b7280; }
 
-      /* 提示 toast */
+      /* 标注列表面板 */
+      #panel {
+        position: fixed; top: 54px; right: 14px; width: 330px; max-height: 70vh;
+        background: #fff; border-radius: 10px; box-shadow: 0 12px 40px rgba(0,0,0,.3);
+        font: 13px/1.4 -apple-system, system-ui, sans-serif; color: #111827;
+        display: none; flex-direction: column; overflow: hidden;
+      }
+      #panel .hd {
+        padding: 10px 12px; border-bottom: 1px solid #f3f4f6; display: flex;
+        justify-content: space-between; align-items: center; font-weight: 600;
+      }
+      #panel .hd button { background: none; border: none; cursor: pointer; color: #9ca3af; font: 15px/1 sans-serif; padding: 0; }
+      #panel .list { overflow-y: auto; flex: 1; }
+      #panel .item {
+        padding: 8px 12px; border-bottom: 1px solid #f9fafb; display: flex; gap: 8px; align-items: flex-start;
+      }
+      #panel .item:hover { background: #f9fafb; }
+      #panel .item .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
+      #panel .item .main { flex: 1; min-width: 0; }
+      #panel .item .sel {
+        font: 11px/1.3 ui-monospace, Menlo, monospace; color: #111827;
+        word-break: break-all; cursor: pointer;
+      }
+      #panel .item .sel:hover { color: #4f8cff; }
+      #panel .item .note { font-size: 12px; color: #6b7280; margin-top: 2px; word-break: break-all; }
+      #panel .empty { padding: 24px 12px; text-align: center; color: #9ca3af; font-size: 12px; }
+      #panel .del {
+        background: none; border: none; cursor: pointer; color: #d1d5db; font: 13px/1 sans-serif;
+        padding: 2px 4px; flex-shrink: 0;
+      }
+      #panel .del:hover { color: #ef4444; }
+      #panel .ft { padding: 8px 12px; border-top: 1px solid #f3f4f6; display: flex; gap: 8px; }
+      #panel .ft button {
+        flex: 1; background: #f3f4f6; color: #374151; border: none; border-radius: 6px;
+        padding: 7px; font: 12px ui-monospace, monospace; cursor: pointer;
+      }
+      #panel .ft button:hover { background: #e5e7eb; }
+
       #toast {
         position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
         background: #111827; color: #fff; font: 13px -apple-system, system-ui, sans-serif;
         padding: 8px 16px; border-radius: 6px; opacity: 0; transition: opacity .2s;
-        pointer-events: none;
+        pointer-events: none; max-width: 80vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
       }
       #toast.show { opacity: 1; }
 
-      /* 选完后的全屏结束遮罩 */
       #done {
         position: fixed; inset: 0; background: rgba(17,24,39,.94); color: #fff;
         display: none; flex-direction: column; align-items: center; justify-content: center;
@@ -149,17 +191,32 @@
     <div id="info"></div>
 
     <div id="bar">
-      <span class="dot"></span><b>PICK MODE</b>
+      <span class="dot"></span><b>PICK</b>
       <span class="muted"><kbd>[</kbd><kbd>]</kbd>切层</span>
-      <span class="muted"><kbd>Enter</kbd>选中</span>
+      <span class="muted"><kbd>⌘C</kbd>复制</span>
+      <span class="muted"><kbd>⌘Z</kbd>撤销</span>
       <span class="muted"><kbd>Esc</kbd>退出</span>
-      <span class="count" id="cnt">0</span>
+      <span class="count" id="cnt" title="点击查看标注列表">0</span>
       <button id="exit">✓ 选完了</button>
+    </div>
+
+    <div id="panel">
+      <div class="hd"><span id="panel-title">标注</span><button id="panel-close">✕</button></div>
+      <div class="list" id="panel-list"></div>
+      <div class="ft">
+        <button id="cp-all">复制全部 selector</button>
+        <button id="cp-all-json">复制 JSON</button>
+      </div>
     </div>
 
     <div id="note-card">
       <div class="sel" id="sel"></div>
-      <textarea id="txt" placeholder="批注：这里想怎么改？"></textarea>
+      <div class="copy-row">
+        <button data-cp="sel">复制 selector</button>
+        <button data-cp="xpath">XPath</button>
+        <button data-cp="html">HTML</button>
+      </div>
+      <textarea id="txt" placeholder="批注：这里想怎么改？（Tab 切标签 · ⌘Enter 提交）"></textarea>
       <div class="tags">
         <div class="tag active" data-tag="改">🔴 改</div>
         <div class="tag" data-tag="问">🟡 问</div>
@@ -167,7 +224,7 @@
       </div>
       <div class="row">
         <button class="no" id="cancel">取消 Esc</button>
-        <button class="ok" id="ok">✓ 确认 Enter</button>
+        <button class="ok" id="ok">✓ 确认 ⌘Enter</button>
       </div>
     </div>
 
@@ -185,25 +242,33 @@
   const elHL = $('hl'), elBadge = $('badge'), elInfo = $('info'),
         elBar = $('bar'), elFab = $('fab'), elCard = $('note-card'),
         elSel = $('sel'), elTxt = $('txt'), elOk = $('ok'),
-        elCancel = $('cancel'), elToast = $('toast'), elCnt = $('cnt');
+        elCancel = $('cancel'), elToast = $('toast'), elCnt = $('cnt'),
+        elPanel = $('panel'), elPanelList = $('panel-list'), elPanelTitle = $('panel-title');
 
   // ---------- 2. 状态 ----------
-  let active = false;        // pick 模式是否激活
-  let stack = [];            // 当前坐标下的元素栈（顶→底）
-  let idx = 0;               // 当前选中第几层
-  let pinned = null;         // 已锁定的元素
+  let active = false;
+  let stack = [];
+  let idx = 0;
+  let pinned = null;
   let curTag = '改';
   let recorded = 0;
+  let panelOpen = false;
 
-  // ---------- 3. 取元素栈（核心） ----------
+  const TAG_COLOR = { '改': '#ef4444', '问': '#f59e0b', '赞': '#10b981' };
+
+  // ---------- 3. 工具 ----------
+  function copyText(text) {
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(() => {}).catch(() => {});
+  }
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+
   function stackAt(clientX, clientY) {
-    // 临时让 host 不拦事件，elementsFromPoint 才会返回它底下的真实页面元素
     const prev = host.style.pointerEvents;
     host.style.pointerEvents = 'none';
     const all = document.elementsFromPoint(clientX, clientY) || [];
     host.style.pointerEvents = prev;
-
-    // 过滤：picker 自身注入物、零尺寸、不可见
     return all.filter((el) => {
       if (!el || el.nodeType !== 1) return false;
       if (el.getAttribute && el.getAttribute(HOST_FLAG) !== null) return false;
@@ -215,7 +280,8 @@
     });
   }
 
-  // 生成稳健 CSS selector
+  function cssEscape(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/[^a-zA-Z0-9_-]/g, '\\$&'); }
+
   function cssPath(el) {
     if (el.id) return '#' + cssEscape(el.id);
     const parts = [];
@@ -223,13 +289,10 @@
     while (cur && cur.nodeType === 1 && cur !== document.documentElement && depth < 6) {
       let sel = cur.nodeName.toLowerCase();
       if (cur.id) { parts.unshift('#' + cssEscape(cur.id)); break; }
-      // 取有区分度的 class（去掉明显 utility 类）
       const cls = [...cur.classList].filter(c => c.length > 1).slice(0, 2);
       if (cls.length) sel += '.' + cls.map(cssEscape).join('.');
       else {
-        // 没 class/ id → 用 nth-of-type 定位
-        const sibs = [...cur.parentElement?.children || []]
-          .filter(s => s.nodeName === cur.nodeName);
+        const sibs = [...(cur.parentElement?.children || [])].filter(s => s.nodeName === cur.nodeName);
         if (sibs.length > 1) sel += `:nth-of-type(${sibs.indexOf(cur) + 1})`;
       }
       parts.unshift(sel);
@@ -238,21 +301,26 @@
     }
     return parts.join(' > ') || el.nodeName.toLowerCase();
   }
-  function cssEscape(s) { return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/[^a-zA-Z0-9_-]/g, '\\$&'); }
 
-  // 生成 XPath（备用，定位更死板但稳）
   function xPath(el) {
     if (el.id) return `//*[@id="${el.id}"]`;
     const parts = [];
     let cur = el;
     while (cur && cur.nodeType === 1 && cur !== document.documentElement) {
-      let i = 1;
-      let sib = cur;
+      let i = 1, sib = cur;
       while ((sib = sib.previousElementSibling)) if (sib.nodeName === cur.nodeName) i++;
       parts.unshift(`${cur.nodeName.toLowerCase()}[${i}]`);
       cur = cur.parentElement;
     }
     return '/' + parts.join('/');
+  }
+
+  // 简短选择器预览：tag#id.class（前 2 个 class）
+  function selectorPreview(el) {
+    let s = el.tagName.toLowerCase();
+    if (el.id) s += '#' + el.id;
+    if (el.classList.length) s += '.' + [...el.classList].slice(0, 2).join('.');
+    return s;
   }
 
   // ---------- 4. 渲染高亮 ----------
@@ -261,51 +329,45 @@
     const r = el.getBoundingClientRect();
     Object.assign(elHL.style, {
       left: r.left + 'px', top: r.top + 'px',
-      width: r.width + 'px', height: r.height + 'px',
-      display: 'block',
+      width: r.width + 'px', height: r.height + 'px', display: 'block',
     });
     elHL.classList.toggle('pin', !!pin);
+
     elBadge.style.display = 'block';
     elBadge.style.left = (r.left + r.width / 2) + 'px';
     elBadge.style.top = r.top + 'px';
-    elBadge.innerHTML = `${idx + 1}<small>/${stack.length}层</small>`;
+    elBadge.innerHTML = `${idx + 1}<small>/${stack.length}层 · ${Math.round(r.width)}×${Math.round(r.height)}</small>`;
 
     elInfo.style.display = 'block';
     elInfo.style.left = r.left + 'px';
     elInfo.style.top = r.top + 'px';
-    const cls = el.className && typeof el.className === 'string' ? ('.' + el.className.trim().split(/\s+/).slice(0, 2).join('.')) : '';
-    elInfo.textContent = el.tagName.toLowerCase() + cls;
+    elInfo.innerHTML = `<span class="pv">${selectorPreview(el)}</span> <span class="dim">${Math.round(r.width)}×${Math.round(r.height)} · ${escapeHtml(cssPath(el))}</span>`;
   }
 
   function currentEl() { return stack[idx] || null; }
-
   function refresh() { applyHighlight(currentEl(), !!pinned); }
 
   // ---------- 5. 模式开关 ----------
   function setActive(on) {
     active = on;
-    host.style.pointerEvents = on ? 'auto' : 'none';   // 激活时拦截页面事件
+    host.style.pointerEvents = on ? 'auto' : 'none';
     elBar.style.display = on ? 'flex' : 'none';
     elFab.style.display = on ? 'none' : 'block';
     document.body.style.cursor = on ? 'crosshair' : '';
     if (!on) { elHL.style.display = 'none'; elBadge.style.display = 'none'; elInfo.style.display = 'none'; }
   }
-  setActive(true);   // 加载即激活
+  setActive(true);
 
   elFab.addEventListener('click', () => setActive(true));
-  // "✓ 选完了" → 通知 server 会话结束，弹出结束遮罩，引导用户回对话
   $('exit').addEventListener('click', () => {
     fetch('/__done', { method: 'POST' }).catch(() => {});
     $('done-n').textContent = recorded;
     $('done').style.display = 'flex';
     setActive(false);
   });
-  $('done-resume').addEventListener('click', () => {
-    $('done').style.display = 'none';
-    setActive(true);
-  });
+  $('done-resume').addEventListener('click', () => { $('done').style.display = 'none'; setActive(true); });
 
-  // ---------- 6. 鼠标移动 → 取栈 ----------
+  // ---------- 6. 鼠标 → 取栈 ----------
   host.addEventListener('mousemove', (e) => {
     if (!active || pinned) return;
     stack = stackAt(e.clientX, e.clientY);
@@ -314,12 +376,10 @@
   });
   host.addEventListener('mouseleave', () => { if (!pinned) { elHL.style.display = 'none'; elBadge.style.display = 'none'; elInfo.style.display = 'none'; } });
 
-  // ---------- 7. 滚轮 / 键盘 → 切层 ----------
-  // 滚轮：主动滚动页面，不抢给切层（否则标注不了下方元素）
   host.addEventListener('wheel', (e) => {
     if (!active) return;
     e.preventDefault();
-    if (pinned) return;          // 批注时不动
+    if (pinned) return;
     window.scrollBy(0, e.deltaY);
   }, { passive: false });
 
@@ -329,111 +389,206 @@
     refresh();
   }
 
-  // ---------- 8. 锁定 → 批注 ----------
+  // ---------- 7. 锁定 → 自动复制 → 批注 ----------
   function pin() {
     const el = currentEl();
     if (!el) return;
     pinned = el;
     applyHighlight(el, true);
 
+    const sel = cssPath(el);
+    copyText(sel);   // 选中即复制
+
     const r = el.getBoundingClientRect();
-    // 把批注卡片贴在元素右侧；放不下就放左侧
     let left = r.right + 10;
-    if (left + 280 > window.innerWidth) left = Math.max(8, r.left - 290);
+    if (left + 300 > window.innerWidth) left = Math.max(8, r.left - 310);
     let top = r.top;
-    if (top + 220 > window.innerHeight) top = Math.max(8, window.innerHeight - 230);
+    if (top + 260 > window.innerHeight) top = Math.max(8, window.innerHeight - 270);
     Object.assign(elCard.style, { display: 'block', left: left + 'px', top: top + 'px' });
 
-    elSel.textContent = cssPath(el);
+    elSel.textContent = sel;
     elTxt.value = '';
+    toast('已复制 selector · ' + (sel.length > 38 ? sel.slice(0, 38) + '…' : sel));
     setTimeout(() => elTxt.focus(), 0);
   }
 
-  function unpin() {
-    pinned = null;
-    elCard.style.display = 'none';
-    refresh();
-  }
+  function unpin() { pinned = null; elCard.style.display = 'none'; refresh(); }
 
-  function submit() {
-    if (!pinned) return;
-    const el = pinned;
+  function payloadFor(el, note) {
     const r = el.getBoundingClientRect();
-    const note = elTxt.value.trim();
-    const payload = {
-      timestamp: Date.now(),
-      url: location.pathname,
-      selector: cssPath(el),
-      xpath: xPath(el),
-      tag: curTag,
+    return {
+      timestamp: Date.now(), url: location.pathname,
+      selector: cssPath(el), xpath: xPath(el), tag: curTag,
       tagName: el.tagName.toLowerCase(),
       textPreview: (el.textContent || '').trim().slice(0, 80),
       htmlPreview: el.outerHTML.slice(0, 200).replace(/\s+/g, ' '),
       rect: { x: Math.round(r.left + scrollX), y: Math.round(r.top + scrollY), w: Math.round(r.width), h: Math.round(r.height) },
       viewport: { w: innerWidth, h: innerHeight },
-      note,
+      note: note || '',
     };
+  }
+
+  function submit() {
+    if (!pinned) return;
+    const payload = payloadFor(pinned, elTxt.value.trim());
+    fetch('/__annotate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+      .then(res => res.json())
+      .then(d => { recorded = d.count ?? recorded + 1; elCnt.textContent = recorded; if (panelOpen) renderPanel(); })
+      .catch(() => toast('提交失败，请重试'));
+    unpin();
+  }
+
+  // 快速标注：hover 时 ⌘Enter，不弹批注框，用当前 tag 直接提交
+  function quickAnnotate() {
+    const el = currentEl();
+    if (!el) return;
+    const payload = payloadFor(el, '');
+    copyText(payload.selector);
     fetch('/__annotate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
       .then(res => res.json())
       .then(d => {
-        recorded = d.count ?? recorded + 1;
-        elCnt.textContent = recorded;
-        toast(`已记录 ${d.id}　(${payload.selector})`);
+        recorded = d.count ?? recorded + 1; elCnt.textContent = recorded;
+        if (panelOpen) renderPanel();
+        const s = payload.selector;
+        toast(`已记录 ${d.id} · 已复制 · ${s.length > 34 ? s.slice(0, 34) + '…' : s}`);
       })
-      .catch(() => toast('提交失败，请重试'));
-    unpin();
+      .catch(() => toast('提交失败'));
   }
 
   elOk.addEventListener('click', submit);
   elCancel.addEventListener('click', unpin);
 
+  // 批注框一键复制
+  root.querySelectorAll('.copy-row button').forEach(b => b.addEventListener('click', () => {
+    const el = pinned; if (!el) return;
+    let text;
+    if (b.dataset.cp === 'sel') text = cssPath(el);
+    else if (b.dataset.cp === 'xpath') text = xPath(el);
+    else text = el.outerHTML;
+    copyText(text);
+    toast('已复制 · ' + (text.length > 40 ? text.slice(0, 40) + '…' : text));
+  }));
+
   root.querySelectorAll('.tag').forEach(t => t.addEventListener('click', () => {
     root.querySelectorAll('.tag').forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    curTag = t.dataset.tag;
+    t.classList.add('active'); curTag = t.dataset.tag;
   }));
+
+  // ---------- 8. 撤销 ----------
+  function undoLast() {
+    fetch('/__undo', { method: 'POST' })
+      .then(res => res.json())
+      .then(d => {
+        if (d.ok) {
+          recorded = d.count; elCnt.textContent = recorded;
+          if (panelOpen) renderPanel();
+          toast(d.id ? `已撤销 ${d.id}` : '没有可撤销的');
+        }
+      }).catch(() => toast('撤销失败'));
+  }
+
+  // ---------- 9. 标注面板 ----------
+  async function renderPanel() {
+    elPanelTitle.textContent = `标注 (${recorded})`;
+    try {
+      const data = await fetch('/__annotate').then(r => r.json());
+      const items = data.annotations || [];
+      elPanelList.innerHTML = items.length ? items.map(a => `
+        <div class="item">
+          <span class="dot" style="background:${TAG_COLOR[a.tag] || '#9ca3af'}"></span>
+          <div class="main">
+            <div class="sel" data-cp="${escapeHtml(a.selector)}">${escapeHtml(a.selector || '')}</div>
+            ${a.note ? `<div class="note">${escapeHtml(a.note)}</div>` : ''}
+          </div>
+          <button class="del" data-del="${escapeHtml(a.id)}" title="删除">✕</button>
+        </div>`).join('') : '<div class="empty">还没有标注</div>';
+      elPanelList.querySelectorAll('.sel').forEach(s => s.addEventListener('click', () => {
+        copyText(s.dataset.cp);
+        toast('已复制 · ' + (s.dataset.cp.length > 40 ? s.dataset.cp.slice(0, 40) + '…' : s.dataset.cp));
+      }));
+      elPanelList.querySelectorAll('.del').forEach(b => b.addEventListener('click', () => deleteAnno(b.dataset.del)));
+    } catch {}
+  }
+
+  function deleteAnno(id) {
+    fetch('/__delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) })
+      .then(r => r.json())
+      .then(d => { if (d.ok) { recorded = d.count; elCnt.textContent = recorded; renderPanel(); toast('已删除'); } })
+      .catch(() => toast('删除失败'));
+  }
+
+  function togglePanel() {
+    panelOpen = !panelOpen;
+    elPanel.style.display = panelOpen ? 'flex' : 'none';
+    if (panelOpen) renderPanel();
+  }
+  elCnt.addEventListener('click', togglePanel);
+  $('panel-close').addEventListener('click', togglePanel);
+  $('cp-all').addEventListener('click', async () => {
+    const data = await fetch('/__annotate').then(r => r.json());
+    const items = data.annotations || [];
+    copyText(items.map(a => a.selector).join('\n'));
+    toast(`已复制 ${items.length} 条 selector`);
+  });
+  $('cp-all-json').addEventListener('click', async () => {
+    const data = await fetch('/__annotate').then(r => r.json());
+    copyText(JSON.stringify(data, null, 2));
+    toast('已复制 JSON');
+  });
 
   function toast(msg) {
     elToast.textContent = msg;
     elToast.classList.add('show');
     clearTimeout(toast._t);
-    toast._t = setTimeout(() => elToast.classList.remove('show'), 1600);
+    toast._t = setTimeout(() => elToast.classList.remove('show'), 1800);
   }
 
-  // ---------- 9. 全局键盘 ----------
+  // ---------- 10. 全局键盘 ----------
   document.addEventListener('keydown', (e) => {
-    // 批注框打开时的快捷键
+    const mod = e.metaKey || e.ctrlKey;
+
+    // 批注框打开时
     if (pinned) {
-      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || e.target === elTxt && !e.shiftKey)) {
-        // 在 textarea 里直接 Enter 也提交（Shift+Enter 换行）
-        if (e.target === elTxt) { e.preventDefault(); submit(); }
-      } else if (e.key === 'Escape') { unpin(); }
+      if (e.key === 'Enter' && (mod || (e.target === elTxt && !e.shiftKey))) {
+        if (e.target === elTxt || mod) { e.preventDefault(); submit(); }
+      } else if (e.key === 'Escape') {
+        unpin();
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+        const tags = ['改', '问', '赞'];
+        curTag = tags[(tags.indexOf(curTag) + (e.shiftKey ? -1 : 1) + 3) % 3];
+        root.querySelectorAll('.tag').forEach(x => x.classList.toggle('active', x.dataset.tag === curTag));
+      }
       return;
     }
+
     if (!active) {
-      if (e.key.toLowerCase() === 'p' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        // 防止在输入框里误触
+      if (e.key.toLowerCase() === 'p' && !mod && !e.altKey) {
         if (/input|textarea/i.test(document.activeElement?.tagName || '')) return;
         e.preventDefault(); setActive(true);
       }
       return;
     }
+
+    // pick 模式（hover）快捷键
+    if (mod && e.key.toLowerCase() === 'c') { e.preventDefault(); const el = currentEl(); if (!el) return; const sel = cssPath(el); copyText(sel); toast('已复制 · ' + (sel.length > 40 ? sel.slice(0, 40) + '…' : sel)); return; }
+    if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); undoLast(); return; }
+    if (mod && e.key === 'Enter') { e.preventDefault(); quickAnnotate(); return; }
+
     switch (e.key) {
       case ']': case 'ArrowDown': e.preventDefault(); shiftLayer(1); break;
       case '[': case 'ArrowUp':   e.preventDefault(); shiftLayer(-1); break;
-      case '1': case '2': case '3': case '4': case '5':
-        e.preventDefault(); idx = Math.min(stack.length - 1, +e.key - 1); refresh(); break;
       case 'Enter': case ' ': e.preventDefault(); pin(); break;
-      case 'Escape': e.preventDefault(); setActive(false); break;
+      case 'Escape': e.preventDefault(); if (panelOpen) togglePanel(); else setActive(false); break;
+      default:
+        if (/^[1-9]$/.test(e.key)) { e.preventDefault(); idx = Math.min(stack.length - 1, +e.key - 1); refresh(); }
     }
-  }, true);   // capture，抢在页面脚本之前
+  }, true);
 
-  // 滚动/缩放时刷新高亮位置
   window.addEventListener('scroll', () => { if (active) refresh(); }, true);
   window.addEventListener('resize', () => { if (active) refresh(); });
 
-  // 启动时拉一次已记录数
   fetch('/__annotate?count=1').then(r => r.json()).then(d => { recorded = d.count || 0; elCnt.textContent = recorded; }).catch(() => {});
 
-  console.log('%c[PICKER] ready', 'color:#4f8cff', '移动鼠标 → [ ] 切层 → Enter 选中 → 批注确认');
+  console.log('%c[PICKER] ready', 'color:#4f8cff', '⌘C 复制 · ⌘Enter 快速标注 · ⌘Z 撤销 · Enter 选中');
 })();

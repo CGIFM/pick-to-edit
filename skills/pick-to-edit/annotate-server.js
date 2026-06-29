@@ -103,6 +103,25 @@ const server = http.createServer(async (req, res) => {
     return res.end(JSON.stringify({ ok: true }));
   }
 
+  // —— 撤销最后一条标注 ——
+  if (url.pathname === '/__undo' && req.method === 'POST') {
+    const data = readAnno();
+    const removed = data.annotations.pop();
+    if (removed) writeAnno(data);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: !!removed, id: removed ? removed.id : null, count: data.annotations.length }));
+  }
+
+  // —— 删除指定标注 ——
+  if (url.pathname === '/__delete' && req.method === 'POST') {
+    const body = await readBody(req) || {};
+    const data = readAnno();
+    data.annotations = data.annotations.filter(a => a.id !== body.id);
+    writeAnno(data);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, count: data.annotations.length }));
+  }
+
   // —— 会话结束标记（用户点了"✓ 选完了"）——
   if (url.pathname === '/__done') {
     const data = readAnno();
