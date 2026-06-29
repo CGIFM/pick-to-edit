@@ -1,0 +1,19 @@
+{
+  "name": "pick-to-edit",
+  "version": "1.0.0",
+  "description": "Visually pick and annotate webpage elements, so Claude Code knows exactly what to change",
+  "license": "MIT",
+  "author": "FengMingyang",
+  "scripts": {
+    "annotate": "node annotate-server.js"
+  },
+  "keywords": [
+    "claude-code",
+    "claude-skill",
+    "ui-annotation",
+    "element-picker",
+    "web",
+    "frontend",
+    "visual-editing"
+  ]
+}

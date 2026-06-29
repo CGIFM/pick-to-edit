@@ -1,0 +1,5 @@
+node_modules/
+annotations.json
+.DS_Store
+*.log
+.playwright-mcp/
